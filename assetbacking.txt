@@ -1,0 +1,72 @@
+Asset Backing
+Every dreUSD in circulation is backed by real-world assets held at regulated custodians. dreUSD is over-collateralized, meaning the total value of backing assets exceeds the total supply of dreUSD.
+
+Asset Backing Composition
+Assets are allocated across 3 categories. Each serves a distinct role in balancing returns, liquidity, and risk.
+
+Property Credit
+Secured lending against real property. Borrowers pay interest on these loans, and that interest is the primary source of returns for dreUSDs holders.
+
+Property credit is among the most established asset classes in finance, with nearly a century of performance data across economic cycles. These loans are backed by physical collateral (the property itself), which provides a recovery path if a borrower defaults. Property credit can also be sold on secondary markets (markets where existing loans are traded between investors), providing liquidity when needed.
+
+Returns from property credit are driven by borrower interest payments, which are tied to lending rates and housing demand. These factors operate independently of crypto market conditions.
+
+Why DRE Property Credit is Superior:
+
+DRE exclusively operates in senior property credit positions, ensuring it holds first rights of recovery across all underlying assets.
+
+Each investment is subject to a strict and disciplined eligibility framework, with only high quality opportunities meeting DRE’s approval standards.
+
+All senior property credit exposures are supported by a dedicated standby backstop facility, designed to provide liquidity and ensure the timely repayment of DRE positions.
+
+Secured Loans
+Short duration loans secured by high quality collateral.
+
+Allocations are selected for credit quality, collateral strength, and short tenor. Details on structure, eligibility, and partners will be published as this allocation is finalized.
+
+Cash Equivalents
+Short term, highly liquid instruments such as money market funds and Treasury bills. Cash equivalents serve as the liquidity buffer, ensuring the protocol can meet redemption demand without selling longer duration assets at a discount.
+
+This allocation prioritizes capital preservation and immediate availability over returns.
+
+Custody and Management
+Deposited stablecoins and the resulting reserve assets are held at regulated custodians and partners. The protocol does not self-custody assets.
+
+DRE's custodian and trustee is TMF Group, a global independent fund services provider operating in over 80 jurisdictions. TMF acts as custodian and trustee at arm's length from DRE. They hold no operational role in DRE and have no involvement in investment decisions. DRE manages allocation decisions.
+
+TMF holds assets in a trust structure established specifically for DRE. The trust is bankruptcy remote, meaning depositor assets are legally segregated from DRE's operational accounts, from TMF's own balance sheet, and from borrower assets
+
+How Property Credit is Structured
+When deposited funds are allocated to property credit, the path from deposit to mortgage follows a defined chain:
+
+Deposit: Users deposit USDC and mint dreUSD. Deposited funds are routed to TMF, the custodian and trustee.
+
+Allocation: TMF allocates capital into secured property credit through a dedicated trust structure established for DRE.
+
+Lending: The trust makes individual loans to standalone property SPVs (special purpose vehicles). Each property is held in its own SPV, providing compartmentalization between loans. There is no cross-collateralization across properties.
+
+Security: DRE holds senior mortgage positions on all property credit exposures, with full mortgagee rights and powers. This means DRE is first in line for recovery on the underlying property if a borrower defaults.
+
+The trust structure ensures depositor funds remain segregated at every stage. No assets are commingled across strategies, ventures, or other parties.
+
+Structural Safeguards
+DRE's off-chain asset structure includes multiple layers of protection for depositors:
+
+Bankruptcy remoteness: Depositor funds are held in a trust that is legally separate from DRE's operating entity, from the trustee's own assets, and from any borrower. If any single party in the chain were to face financial difficulty, depositor assets remain protected within the trust.
+
+No commingling: Each property loan is held in a standalone SPV. Depositor funds are not mixed with other strategies, ventures, or investor pools. One lending pool, one portfolio.
+
+Independent oversight: Multiple independent parties provide oversight across the assets. No single party controls the full picture.
+
+Audited financials: The trust produces externally prepared quarterly financial reports and is audited at the end of each financial year. These reports are part of DRE's attestation package and are made available through the Transparency Dashboard.
+
+Regulatory framework: All off-chain asset management operates within a regulated framework. The custodian is licensed, insured, and subject to ongoing compliance obligations. DRE's property credit activities operate under established Australian financial services regulations.
+
+Verification
+The asset backing is verifiable through multiple channels:
+
+Proof of reserves: Attestations published confirm that dreUSD is fully backed. These attestations are generated by third-parties.
+
+Independent audits: Backing composition and asset valuations are audited by a leading global audit firm. Smart contracts are audited by independent security audit firms.
+
+Transparent supply: dreUSD total supply is readable on-chain at any time. The ratio of backing assets to circulating supply is publicly verifiable.
