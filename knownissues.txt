@@ -1,0 +1,397 @@
+#### Finding 2: aUSDC balance-delta check can falsely revert legitimate withdrawals
+
+**Severity:** medium
+
+**Location:**
+
+_Start Line:_ 122
+
+_End Line:_ 125
+
+**Description:**
+
+_Summary_
+
+`withdraw` in `dreAaveAdapter.sol` assumes that a successful `IERC20(aUsdc).safeTransferFrom(vault, address(this), amount)` must increase `IERC20(aUsdc).balanceOf(address(this))` by at least `amount`. For Aave aTokens, that assumption is incorrect because balances are derived from scaled balances and the reserve liquidity index, with rounding at conversion boundaries. A legitimate transfer can therefore produce a visible increase of `amount - 1` in the smallest unit, causing `WithdrawalFailed()` even when the `vault` holds sufficient transferable `aUsdc`. This supports spurious withdrawal failure through the adapter path, but does not establish that all higher-level retry or recovery paths are unavailable.
+
+_Root Cause_
+
+The root cause is the strict equality-style accounting in `withdraw`: it records `balanceBefore`, performs `safeTransferFrom`, computes `delta`, and reverts when `delta < amount`. That check treats the nominal transfer argument as the minimum observable post-transfer `balanceOf` increase, even though `aUsdc` transfers move scaled balances and expose rounded nominal balances.
+
+A second strict check compounds the issue. After calling `IAaveV3Pool(aavePool).withdraw(usdc, delta, to)`, the function reverts when `withdrawn < amount`, so a rounded transfer delta such as `amount - 1` still fails even if the transferred `aUsdc` was otherwise valid and redeemable through Aave.
+
+_Impact_
+
+The supported impact is a _denial of service for specific withdrawal attempts_ routed through this adapter. Some otherwise fundable withdrawals can revert solely because `aUsdc` rounding makes the observable balance delta slightly smaller than the requested nominal `amount`.
+
+The available evidence does _not_ establish permanent fund loss, irreversible lockup at the manager or NFT layer, or that operators are forced to bypass the adapter or patch the contract because no other recovery path exists.
+
+_Scenario_
+
+- `dreUSDManager` calls `withdraw(amount, to)` with sufficient `aUsdc` available in `vault`, but the `aUsdc` transfer rounds such that `IERC20(aUsdc).balanceOf(address(this)) - balanceBefore == amount - 1`. The function hits `if (delta < amount) revert WithdrawalFailed();` and the withdrawal fails spuriously.
+- A successful transfer yields `delta == amount - 1`, and `IAaveV3Pool(aavePool).withdraw(usdc, delta, to)` returns `withdrawn == delta`. The subsequent `if (withdrawn < amount) revert WithdrawalFailed();` check reverts the transaction even though the transferred position was otherwise redeemable.
+
+**Affected Code:**
+
+```
+/// @inheritdoc IAaveV3Adapter
+function withdraw(
+        uint256 amount,
+        address to
+    ) external returns (uint256 withdrawn) {
+        if (msg.sender != dreUSDManager) revert InvalidCaller();
+        if (amount == 0) revert ZeroAmount();
+        if (amount == type(uint256).max) revert MaxSentinelNotSupported();
+        if (to == address(0)) revert ZeroAddress();
+
+        // Check vault has enough aUSDC and has given us allowance
+        uint256 available = getAvailableBalance();
+        if (available < amount) revert InsufficientBalance(available, amount);
+
+        uint256 balanceBefore = IERC20(aUsdc).balanceOf(address(this));
+        IERC20(aUsdc).safeTransferFrom(vault, address(this), amount);
+        uint256 delta = IERC20(aUsdc).balanceOf(address(this)) - balanceBefore;
+        if (delta < amount) revert WithdrawalFailed();
+
+        // Withdraw exact transfer delta so residual/donated aUSDC on adapter cannot affect user fills
+        withdrawn = IAaveV3Pool(aavePool).withdraw(usdc, delta, to);
+
+        if (withdrawn < amount) revert WithdrawalFailed();
+
+        emit Withdrawn(to, withdrawn);
+    }
+```
+
+**Recommendation:**
+
+Replace the strict balance-delta and withdrawn-amount comparisons with logic that accounts for Aave aToken rounding. The adapter should treat the actual amount received and redeemed as authoritative, rather than requiring the observable `aUsdc` balance increase or `withdraw` return value to be at least the requested nominal `amount`.
+
+Use a rounding-tolerant validation strategy for transfers and redemptions, and ensure the function proceeds when the transferred `aUsdc` and the redeemed `USDC` are consistent with Aave’s scaled-balance accounting model. If an exact output amount is required by downstream components, handle any small shortfall explicitly through well-defined tolerance, compensation, or accounting logic instead of reverting on a one-unit discrepancy.
+
+---
+
+#### Finding 7: Zero `minAmountLD` Allows Zero-Amount OFT Sends and Strands Redeemed dreUSD
+
+**Severity:** medium
+
+**Location:**
+
+_Start Line:_ 124
+
+_End Line:_ 139
+
+**Description:**
+
+_Summary_
+
+The `_redeemAndSend` function preserves the caller-provided `minAmountLD` and redeems assets before bridging them through the OFT `_send` flow. However, it does not verify that the redeemed `assetAmountReceived` is large enough to be bridgeable after LayerZero OFT shared-decimal rounding. If the redeemed amount is rounded down to zero and `minAmountLD = 0`, the call can succeed while bridging nothing, leaving the redeemed `dreUSD` stranded in the composer after the user's shares were already redeemed.
+
+_Root Cause_
+
+In `_redeemAndSend`, the contract only checks slippage through `_assertSlippage(assetAmountReceived, 0)` when the user supplies `minAmountLD = 0`. This validates the raw redeemed amount, but it does not validate the amount that the OFT will actually bridge after LayerZero shared-decimal conversion.
+
+With `dreUSD` configured as a native OFT, the `_send` path rounds the amount down to the nearest shared-decimal unit. If `assetAmountReceived` is below that unit, `_send` can still execute with an effective bridged amount of zero. `_redeemAndSend` does not reject this unbridgeable dust and does not pre-compute or post-validate the final OFT debit result before calling `_send`.
+
+The composer also has no generic token rescue path. Because later redemptions only forward the new balance delta, any `dreUSD` left behind by this zero-effective bridge is not recoverable through normal flows.
+
+_Impact_
+
+A user can redeem shares successfully but receive no bridged assets if the redeemed `dreUSD` amount is rounded down to zero during the OFT send.
+
+The redeemed `dreUSD` can become permanently stranded in the composer under normal operation.
+
+This creates a direct loss scenario for users because their shares are already redeemed even though no usable amount is bridged out.
+
+_Scenario_
+
+- A user calls `_redeemAndSend` with a very small redemption amount and sets `minAmountLD = 0`.
+- The redemption returns `assetAmountReceived`, and `_assertSlippage(assetAmountReceived, 0)` passes.
+- Because `dreUSD` is a native OFT, `_send` rounds the amount down to the nearest shared-decimal unit.
+- If `assetAmountReceived` is below that unit, the effective bridged amount becomes zero, but the transaction still succeeds.
+- The user's shares are redeemed, no assets are delivered through the bridge, and the redeemed `dreUSD` remains stuck in the composer.
+
+- After such a transaction, future redemptions only forward the fresh balance delta.
+- Since the contract has no generic token rescue path, the previously stranded `dreUSD` cannot be recovered through normal flows.
+
+**Affected Code:**
+
+```
+/**
+     * @dev Override _redeemAndSend to separate vault-conversion slippage from OFT slippage
+     * @dev This fixes the audit issue where minAmountLD is set to 0, disabling OFT-level minimum-amount checks
+     * @param _redeemer The address of the redeemer in bytes32 format
+     * @param _shareAmount The number of shares to redeem
+     * @param _sendParam Parameter that defines how to send the assets
+     * @param _refundAddress Address to receive excess payment of the LZ fees
+     * @param _msgValue The amount of native tokens sent with the transaction
+     * @notice This function preserves the user's minAmountLD for OFT send while using it for vault slippage
+     */
+    function _redeemAndSend(
+        bytes32 _redeemer,
+        uint256 _shareAmount,
+        SendParam memory _sendParam,
+        address _refundAddress,
+        uint256 _msgValue
+    ) internal override {
+        uint256 preAssetBalance = IERC20(ASSET_ERC20).balanceOf(address(this));
+        /// @dev Async functions may return an amount on `redeem`, but not transfer asset tokens.
+        _redeem(_redeemer, _shareAmount);
+        uint256 postAssetBalance = IERC20(ASSET_ERC20).balanceOf(address(this));
+
+        uint256 assetAmountReceived = postAssetBalance - preAssetBalance;
+
+        // Store the original minAmountLD for OFT slippage protection
+        // This represents the user's minimum expectation for the final bridged amount
+        uint256 minAmountLD = _sendParam.minAmountLD;
+
+        // Use minAmountLD for vault redemption slippage check
+        _assertSlippage(assetAmountReceived, minAmountLD);
+
+        _sendParam.amountLD = assetAmountReceived;
+        // Preserve minAmountLD for OFT send instead of setting it to 0
+        // This ensures OFT-level minimum-amount checks are enforced, preventing dust removal
+        // from resulting in zero sends while leaving residual tokens trapped in the composer
+        _sendParam.minAmountLD = minAmountLD;
+
+        _send(ASSET_OFT, _sendParam, _refundAddress, _msgValue);
+        emit Redeemed(_redeemer, _sendParam.to, _sendParam.dstEid, _shareAmount, assetAmountReceived);
+    }
+```
+
+**Recommendation:**
+
+Validate the post-redemption amount against the actual OFT-bridgeable amount before calling `_send`. Specifically, reject any redemption whose `assetAmountReceived` would round down to zero after LayerZero shared-decimal conversion, even when `minAmountLD = 0`.
+
+Apply slippage protection to the effective bridged amount rather than only the raw redeemed amount, so the transaction reverts unless a non-zero transferable amount satisfying the user’s minimum is delivered into the OFT send flow.
+
+Additionally, add a controlled recovery mechanism for tokens accidentally retained by the composer, or otherwise ensure no redeemed `dreUSD` can remain stranded if bridging cannot proceed.
+
+---
+
+
+
+#### Finding 9: Paused rewards distributor makes `_withdraw` account against inaccessible assets and can lock remaining withdrawals
+
+**Severity:** medium
+
+**Location:**
+
+_Start Line:_ 204
+
+_End Line:_ 207
+
+**Description:**
+
+_Summary_
+
+In [`dreUSDs.sol`](dreUSDs.sol), `_withdraw()` consumes `assets` from `_virtualBalance` after attempting to claim vested rewards. When `rewardsDistributor` is paused, `_claimVestedRewards()` returns `0`, so withdrawals that rely on `IdreRewardsDistributor(rewardsDistributor).vestedAmount()` rather than already-liquid funds can revert. The confirmed issue is a _missing liquidity-aware withdrawal check_ during distributor pause, not that `totalAssets()` must exclude paused vested rewards for all ERC4626 pricing paths.
+
+_Root Cause_
+
+`_withdraw(address caller, address receiver, address owner, uint256 assets, uint256 shares)` executes:
+`_virtualBalance += _claimVestedRewards();`
+`_virtualBalance -= assets;`
+`super._withdraw(...)`
+
+If the configured `rewardsDistributor` is paused, `_claimVestedRewards()` realizes no rewards, so `_virtualBalance` is not increased before the subtraction. Once a withdrawal depends on paused vested rewards instead of the liquid balance already tracked in `_virtualBalance`, the subtraction can underflow and revert.
+
+This also makes liquidity-sensitive limits such as `maxWithdraw()` and `maxRedeem()` unreliable unless they are separately constrained to currently realizable assets. By contrast, `totalAssets()` including paused but still-owned vested rewards is _not_ inherently incorrect under ERC4626, so assertions that share pricing, `preview*`, `deposit`, or `mint` are necessarily mispriced are not supported by this issue alone.
+
+_Impact_
+
+The supported impact is a _temporary withdrawal denial_ when the vault remains unpaused but the configured `rewardsDistributor` is paused and part of the reported assets are not presently claimable. In that state:
+
+- `withdraw` and `redeem` can revert once requests exceed the liquid `_virtualBalance`.
+- `maxWithdraw` and `maxRedeem` can overstate what is immediately withdrawable if they rely on total managed assets rather than realizable liquidity.
+- Earlier withdrawals can consume the liquid portion first, leaving later holders unable to exit until the distributor is unpaused or liquidity is otherwise restored.
+
+No broader conclusion is established for ERC4626 valuation, `preview*` outputs, or `deposit`/`mint` quoting solely from paused rewards remaining in `totalAssets()`.
+
+_Scenario_
+
+- A `rewardsDistributor` is configured, rewards have vested, the vault is not paused, and the distributor is paused. `totalAssets()` still reflects `vestedAmount()`, but `_claimVestedRewards()` returns `0`. A user calls `withdraw` or `redeem` for an amount that exceeds liquid `_virtualBalance`, causing `_virtualBalance -= assets` in `_withdraw()` to revert.
+- Some users exit early while enough liquid balance remains. After that liquid portion is exhausted, later users still hold shares backed in part by paused vested rewards, but further `withdraw` and `redeem` calls fail until those rewards become claimable again.
+
+**Affected Code:**
+
+```
+/**
+     * @dev Hook called during withdrawal - claims vested rewards first, updates virtual balance; reverts when paused.
+     */
+    function _withdraw(
+        address caller,
+        address receiver,
+        address owner,
+        uint256 assets,
+        uint256 shares
+    ) internal override whenNotPaused {
+        _virtualBalance += _claimVestedRewards();
+        _virtualBalance -= assets;
+        super._withdraw(caller, receiver, owner, assets, shares);
+    }
+```
+
+**Recommendation:**
+
+Ensure withdrawals and redemption limits are based on currently realizable liquidity, not on rewards that are only notionally vested while the `rewardsDistributor` is paused. In particular, `_withdraw()` should not account for assets as available unless they have already been successfully claimed or are otherwise immediately liquid, and `maxWithdraw()` / `maxRedeem()` should be capped to the amount that can actually be withdrawn at that time. If paused vested rewards remain included in accounting such as `totalAssets()`, clearly separate valuation from withdrawable liquidity so withdrawals cannot rely on inaccessible assets and become blocked until the distributor is unpaused.
+
+---
+
+
+
+#### Finding 15: Paused Vault Causes `_credit` Fallback Transfer to Revert, Locking Inbound Bridged Shares
+
+**Severity:** medium
+
+**Location:**
+
+_Start Line:_ 77
+
+_End Line:_ 78
+
+**Description:**
+
+_Summary_
+
+The `\_credit` logic is meant to prevent inbound LayerZero share transfers from getting stuck. It does this by trying to transfer `dreUSDs` to `\_to`, and if that fails, sending the same amount to `stuckFundsRecipient` instead. This recovery path does not work when the vault is paused, because `dreUSDs._update()` is protected by `whenNotPaused` and both transfers use that same paused transfer path. As a result, `\_credit` still reverts, the cross-chain message cannot be delivered, and bridged shares remain locked until the vault is unpaused and the packet is retried.
+
+_Root Cause_
+
+The main issue is in `\_credit`, which assumes that a failed transfer to `\_to` can be recovered by rerouting the same `\_amountLD` to `stuckFundsRecipient`. That assumption is false for the wrapped share token `dreUSDs`, because its transfer logic ultimately goes through `dreUSDs._update()`, which is guarded by `whenNotPaused`.
+
+When the vault is paused, the first `transfer(\_to, \_amountLD)` inside `\_tryTransfer` reverts. Although this failure is caught and causes `\_tryTransfer` to return `false`, the fallback call `innerToken.safeTransfer(stuckFundsRecipient, \_amountLD)` uses the same paused ERC20 transfer path. Because that path also reaches `dreUSDs._update()` under `whenNotPaused`, the fallback transfer reverts as well.
+
+As a result, the recovery behavior implemented in `\_credit` does not actually recover failed inbound transfers during pause conditions. Instead of isolating the failure and redirecting funds, the whole `\_credit` flow still reverts.
+
+_Impact_
+
+The adapter’s intended recovery mechanism is broken during pause conditions. Failed inbound share transfers are not redirected to `stuckFundsRecipient` as intended.
+
+Cross-chain message delivery can fail because `\_credit` reverts. This creates a _denial of service_ condition for inbound bridged share transfers while the vault is paused.
+
+Bridged shares can remain temporarily locked until the vault is unpaused and the packet is retried. This is especially likely during emergency pauses, which is exactly when the fallback path is expected to help.
+
+_Scenario_
+
+- A LayerZero message delivers bridged shares and calls `\_credit` to send `dreUSDs` to `\_to`.
+- The vault is paused, so `dreUSDs._update()` rejects the transfer through `whenNotPaused`.
+- The first transfer in `\_tryTransfer`, `transfer(\_to, \_amountLD)`, fails and returns `false`.
+- `\_credit` then tries `innerToken.safeTransfer(stuckFundsRecipient, \_amountLD)`, but this uses the same paused `dreUSDs` transfer path and reverts.
+- The full `\_credit` call reverts, the cross-chain message is not delivered, and the bridged shares stay locked until unpause and retry.
+
+- During an emergency pause, operators may expect failed inbound transfers to be recoverable through `stuckFundsRecipient`.
+- Instead, both the primary transfer and fallback transfer fail for the same reason, so the adapter cannot complete the inbound credit flow during the pause.
+
+**Affected Code:**
+
+```
+function _credit(
+        address _to,
+        uint256 _amountLD,
+        uint32 _srcEid
+    ) internal override returns (uint256 amountReceivedLD) {
+        if (!_tryTransfer(_to, _amountLD)) {
+            innerToken.safeTransfer(stuckFundsRecipient, _amountLD);
+            emit StuckFundsRecovered(_to, _amountLD, _srcEid);
+            return _amountLD;
+        }
+        return _amountLD;
+    }
+```
+
+**Recommendation:**
+
+Ensure the fallback path in `_credit` does not rely on the same paused transfer mechanism as the primary `dreUSDs` transfer. In particular, do not assume that rerouting funds to `stuckFundsRecipient` will succeed if `dreUSDs` transfers are globally blocked by `whenNotPaused`.
+
+Implement a pause-safe recovery path for inbound credits so that cross-chain message delivery does not revert solely because the vault is paused. This can be achieved by separating accounting for failed inbound transfers from immediate token delivery, allowing the amount to be claimed or settled after unpause, or by introducing a narrowly scoped exception that permits this specific recovery flow during pause conditions.
+
+Also review whether LayerZero message handling should avoid hard reverts for this class of operational pause scenario, so inbound bridged shares are not locked while the system is paused.
+
+---
+
+
+
+#### Finding 31: [Discussion] Blocked express-withdrawal NFTs can permanently lock queue capacity
+
+**Severity:** medium
+
+**Location:**
+
+_Start Line:_ 619
+
+_End Line:_ 622
+
+**Description:**
+
+Root cause and mechanism
+
+The reported issue concerns the express-withdrawal flow reserving global capacity at request time and potentially lacking a cleanup path if the corresponding withdrawal NFT later becomes owned by a blocked address.
+
+According to the reported flow, `requestExpressWithdrawal()` burns the user's dreUSD up front, and `_queueExpressWithdrawal()` immediately reduces `expressWithdrawalAvailable` by the full gross USDC amount reserved for that request. The NFT is then minted to represent the claim, while `expressWithdrawalFees[tokenId]` stores the fee separately and the NFT position stores the user's net `usdcAmount`.
+
+The concern is that when `EXPRESS_OPERATOR_ROLE` later processes positions through `fillExpressWithdrawals()`, the function may fetch the current NFT owner and check `IdreUSD(dreUSD).isBlockedAddress(currentOwner)`. If the owner is frozen or sanctioned, the reported behavior is that the function only emits `WithdrawalSanctioned(tokenId, currentOwner)` and continues to the next token, without burning or canceling the NFT, paying the user, restoring `expressWithdrawalAvailable`, clearing `expressWithdrawalFees[tokenId]`, creating `expressFillerDebt`, or providing another settlement path. If that behavior is accurate, the position could remain unresolved while the previously reserved express capacity stays consumed.
+
+The finding further states that `dreWithdrawalNFT` validates the current owner in `_update`, which would prevent a blocked owner from transferring the NFT to a clean address or burning it. If that implementation detail is correct, a claim could become trapped once the owner is blocked after request but before fill. The finding also notes that `payExpressDebt` would not help if skipped blocked positions never create `expressFillerDebt`.
+
+One narrow point is confirmed by the provided `updateExpressWithdrawal()` snippet: any unreleased reduction in `expressWithdrawalAvailable` is treated as `outstanding`, and governance cannot lower `maxLimit` below that amount because the function reverts with `ExpressLimitBelowOutstanding(maxLimit, outstanding)`. Therefore, if blocked positions do keep `expressWithdrawalAvailable` reduced, they would also prevent the configured limit from being reduced below the trapped amount.
+
+Trigger conditions and assumptions
+
+This scenario depends on all of the following being true:
+
+- A user successfully requests an express withdrawal, causing dreUSD to be burned and `expressWithdrawalAvailable` to be reduced immediately.
+- Before the request is filled, the current owner of the express-withdrawal NFT becomes frozen or sanctioned according to `IdreUSD(dreUSD).isBlockedAddress(currentOwner)`.
+- `fillExpressWithdrawals()` skips blocked owners instead of resolving or canceling the position.
+- `dreWithdrawalNFT._update` enforces blocked-status checks in a way that prevents transfer or burn by the blocked owner.
+- No separate admin, compliance, clawback, cancellation, unlock, or delayed-settlement flow exists to resolve the blocked position later, including after unblocking.
+
+Impact if the assumptions hold
+
+If the above behavior is accurate, the result could be both a stuck user claim and locked protocol capacity. The user's dreUSD would already have been burned, while the express-withdrawal claim could remain unpaid indefinitely. At the protocol level, reserved express capacity would remain consumed because `expressWithdrawalAvailable` was reduced at queue time and never restored for the blocked position. Repetition across enough token IDs could consume part or all of `expressWithdrawalMaxLimit`, denying subsequent users access to express withdrawals, and governance would be unable to reduce `maxLimit` below the resulting outstanding amount.
+
+Discussion status and missing context
+
+A definitive verdict cannot yet be reached because the central premises have not been independently verified from the full implementations of `requestExpressWithdrawal`, `_queueExpressWithdrawal`, `fillExpressWithdrawals`, `payExpressDebt`, and `dreWithdrawalNFT._update`. In particular, it remains unclear whether blocked owners are truly skipped with no cleanup or recovery path, whether blocked NFTs can in fact never be transferred or burned, and whether a blocked position can later be settled after an unblock or through an administrative/compliance mechanism. Further investigation should focus on those implementations and on any documented operational process for sanctioned accounts, because the confirmed `updateExpressWithdrawal()` behavior establishes the limit-management consequence only if the underlying blocked-position assumptions are correct.
+
+**Affected Code:**
+
+```
+/// @inheritdoc IdreUSDManager
+function updateExpressWithdrawal(
+    uint256 maxLimit,
+    uint256 feeBps,
+    address feeRecipient
+) external onlyRole(WITHDRAWAL_CONFIG_ROLE) {
+    if (maxLimit == 0) revert ZeroAmount();
+    if (feeBps > MAX_EXPRESS_WITHDRAWAL_FEE_BPS) revert InvalidLimit(); // Max 5%
+    if (feeRecipient == address(0)) revert ZeroAddress();
+    if (
+        maxLimit == expressWithdrawalMaxLimit
+            && feeBps == expressWithdrawalFeeBps
+            && feeRecipient == expressFeeRecipient
+    ) revert SameExpressWithdrawalConfig();
+    uint256 oldLimit = expressWithdrawalMaxLimit;
+    uint256 oldAvailable = expressWithdrawalAvailable;
+    uint256 outstanding = oldLimit > oldAvailable ? oldLimit - oldAvailable : 0;
+    if (maxLimit < outstanding) revert ExpressLimitBelowOutstanding(maxLimit, outstanding);
+    expressWithdrawalMaxLimit = maxLimit;
+    expressWithdrawalAvailable = maxLimit - outstanding;
+    emit ExpressLimitUpdated(oldLimit, maxLimit);
+    emit ExpressAvailableUpdated(oldAvailable, expressWithdrawalAvailable);
+    uint256 oldFee = expressWithdrawalFeeBps;
+    expressWithdrawalFeeBps = feeBps;
+    emit ExpressFeeUpdated(oldFee, feeBps);
+    address oldRecipient = expressFeeRecipient;
+    expressFeeRecipient = feeRecipient;
+    emit ExpressFeeRecipientUpdated(oldRecipient, feeRecipient);
+}
+```
+
+**Recommendation:**
+
+---
+
+
+
+
+
