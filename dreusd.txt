@@ -1,0 +1,55 @@
+dreUSD
+dreUSD is a stablecoin pegged to $1 USD. Each dollar is fully backed by real world assets held by regulated custodians. dreUSD does not earn rewards on its own. To earn rewards, holders convert dreUSD to dreUSDs.
+
+Minting
+dreUSD is minted by depositing USDC. There is no minimum deposit amount.
+
+Pricing is based on USD, not on the deposited stablecoin. If 1 USDC equals $1.00, depositing 1 USDC mints 1 dreUSD. If USDC drops in value to $0.98, depositing 1 USDC mints 0.98 dreUSD. This protects the asset backing of dreUSD from absorbing a depeg event.
+
+Prices are validated in real time via Chainlink oracle feeds. Every mint includes slippage protection and an expiration deadline. If the rate moves beyond the specified tolerance or the transaction takes too long to execute, it reverts. For the full oracle mechanism, see Oracles(link).
+
+A single-transaction path is also available to mint dreUSD and deposit it into the dreUSDs savings vault in one step.
+
+
+
+
+
+Redemptions
+dreUSD can be redeemed for USDC by initiating a withdrawal. Two withdrawal paths are available:
+
+Path
+
+Target Fill Time
+
+Fee
+
+Claim
+
+Express
+
+~6 hours
+
+Variable
+
+Withdrawal NFT
+
+Standard
+
+7 days
+
+None
+
+Withdrawal NFT
+
+Both paths burn dreUSD immediately on request and issue a withdrawal NFT representing the claim on USDC. These NFTs are transferable.
+
+Express withdrawals draw down from a dedicated pool of funds with a capacity limit. If the request size is greater than the available amount of USDC in the pool, the transaction reverts. The pool is first come first serve, and is refilled regularly. 
+
+Standard withdrawals are filled after a 7 day waiting period. There is no fee.
+
+Custody
+Deposited stablecoins are routed directly to the custodian vault in the same transaction. The minting contract does not hold user funds at any point. It functions as a routing layer. From there, capital is allocated into revenue generating assets. For a detailed breakdown of dreUSD asset backing composition, see Asset Backing.
+
+Compliance
+dreUSD integrates with the Chainalysis sanctions oracle to screen for sanctioned address addresses. Sanctioned addresses cannot mint, receive, or redeem dreUSD.
+A dedicated guardian can freeze specific addresses when required by law or regulation. This role has no other administrative permissions. Freezing is only a compliance mechanism. Compliance checks apply to all dreUSD, dreUSDs, and dreUSD Withdrawal NFTs.
